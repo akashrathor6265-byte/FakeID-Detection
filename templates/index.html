@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FakeID Detection — Team Byte Force</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+
+  <div class="page">
+
+    <!-- HEADER -->
+    <header class="header">
+      <div class="header-icon">🔍</div>
+      <h1>FakeID Detection System</h1>
+      <p class="header-sub">AI-Powered Identity Document Verification</p>
+      <span class="badge">BCS554 · Mini Project · KCCITM Greater Noida · 2026</span>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="main">
+
+      <!-- UPLOAD SECTION -->
+      <div class="card" id="uploadCard">
+        <h2 class="card-title">Upload ID Card</h2>
+        <p class="card-sub">Supports Aadhaar · PAN · Passport · Driving Licence</p>
+
+        <div class="upload-area" id="uploadArea">
+          <div class="upload-icon">📤</div>
+          <p class="upload-text">Drag & drop your ID card photo here</p>
+          <p class="upload-or">— or —</p>
+          <label class="choose-btn" for="fileInput">Choose File</label>
+          <input type="file" id="fileInput" accept="image/*" hidden />
+        </div>
+
+        <!-- PREVIEW -->
+        <div class="preview-box" id="previewBox" style="display:none;">
+          <img id="previewImg" src="" alt="ID Preview" />
+          <button class="remove-btn" id="removeBtn">✕ Remove</button>
+        </div>
+
+        <!-- SCAN BUTTON -->
+        <button class="scan-btn" id="scanBtn" style="display:none;">
+          🤖 Scan ID Card
+        </button>
+      </div>
+
+      <!-- LOADING -->
+      <div class="card loading-card" id="loadingCard" style="display:none;">
+        <div class="spinner"></div>
+        <h3>AI is Analysing...</h3>
+        <p>Running 4-layer detection system</p>
+        <div class="loading-steps">
+          <span class="step" id="step1">🔤 Font Analysis</span>
+          <span class="step" id="step2">🏛️ Logo Check</span>
+          <span class="step" id="step3">📱 QR Validation</span>
+          <span class="step" id="step4">🖼️ Pixel Scan</span>
+        </div>
+      </div>
+
+      <!-- RESULT -->
+      <div class="card result-card" id="resultCard" style="display:none;">
+        <div class="result-icon" id="resultIcon"></div>
+        <h2 class="result-title" id="resultTitle"></h2>
+        <p class="result-sub" id="resultSub"></p>
+
+        <div class="confidence-wrap">
+          <div class="confidence-label">
+            <span>Confidence Score</span>
+            <span id="confidencePct"></span>
+          </div>
+          <div class="confidence-bar">
+            <div class="confidence-fill" id="confidenceFill"></div>
+          </div>
+        </div>
+
+        <div class="checks-grid" id="checksGrid"></div>
+
+        <button class="reset-btn" id="resetBtn">🔄 Scan Another ID</button>
+      </div>
+
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      <p>Team Byte Force &nbsp;|&nbsp; Akash Rathor &nbsp;|&nbsp;
+         KCCITM Greater Noida &nbsp;|&nbsp; BCS554 &nbsp;|&nbsp; 2026</p>
+    </footer>
+
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

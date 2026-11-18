@@ -1,185 +1,571 @@
-import cv2
-import numpy as np
-from PIL import Image
 import io
 import re
-import os
+import cv2
+import numpy as np
+import pytesseract
+
+from PIL import Image, ImageOps
+
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
+
+MAX_IMAGE_SIZE = (1800, 1800)
+MIN_IMAGE_SIZE = 250
+
+# OCR confidence threshold
+OCR_CONFIDENCE = 35
+
+# Document keywords
+DOCUMENT_KEYWORDS = [
+    "election commission",
+    "electors photo identity",
+    "identity card",
+    "voter",
+    "government of india",
+    "income tax department",
+    "permanent account number",
+    "driving licence",
+    "driving license",
+    "passport",
+    "aadhaar",
+    "unique identification",
+    "भारत निर्वाचन आयोग",
+    "निर्वाचक फोटो पहचान पत्र",
+    "भारत सरकार",
+    "आयकर विभाग",
+    "स्थायी खाता संख्या",
+    "आधार"
+]
+
+# Common document field labels
+FIELD_KEYWORDS = [
+    "name",
+    "father",
+    "date of birth",
+    "dob",
+    "gender",
+    "address",
+    "identity",
+    "number",
+    "नाम",
+    "पिता",
+    "जन्म",
+    "लिंग",
+    "पता"
+]
+
+
+# ==========================================================
+# MAIN ANALYSIS FUNCTION
+# ==========================================================
 
 def analyze_image(image_bytes):
-    """
-    Main function — receives image bytes
-    Returns dict with result, confidence, and checks
-    """
-    checks = []
-    scores = []
 
-    # ── Convert bytes to image ─────────────────────────
     try:
-        pil_img = Image.open(io.BytesIO(image_bytes))
-        pil_img = pil_img.convert('RGB')
-        img_array = np.array(pil_img)
-        cv_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        pil_img = Image.open(
+            io.BytesIO(image_bytes)
+        )
+
+        pil_img = ImageOps.exif_transpose(
+            pil_img
+        ).convert("RGB")
+
+        original_width, original_height = pil_img.size
+
+        if min(original_width, original_height) < MIN_IMAGE_SIZE:
+            return error_result(
+                "Image resolution is too small"
+            )
+
+        pil_img.thumbnail(MAX_IMAGE_SIZE)
+
+        cv_img = cv2.cvtColor(
+            np.array(pil_img),
+            cv2.COLOR_RGB2BGR
+        )
+
     except Exception:
-        return error_result()
+        return error_result(
+            "Unable to read uploaded image"
+        )
 
-    # ── CHECK 1: Image Quality ─────────────────────────
-    quality_result = check_image_quality(cv_img)
-    checks.append(quality_result)
-    scores.append(quality_result['score'])
+    # ------------------------------------------------------
+    # STAGE 1: IMAGE QUALITY
+    # ------------------------------------------------------
 
-    # ── CHECK 2: Pixel Tampering (ELA) ─────────────────
-    ela_result = check_ela_tampering(pil_img)
-    checks.append(ela_result)
-    scores.append(ela_result['score'])
+    quality = check_quality(cv_img)
 
-    # ── CHECK 3: Edge Consistency ──────────────────────
-    edge_result = check_edge_consistency(cv_img)
-    checks.append(edge_result)
-    scores.append(edge_result['score'])
+    # ------------------------------------------------------
+    # STAGE 2: DOCUMENT SHAPE
+    # ------------------------------------------------------
 
-    # ── CHECK 4: Color Distribution ────────────────────
-    color_result = check_color_distribution(cv_img)
-    checks.append(color_result)
-    scores.append(color_result['score'])
+    shape = check_card_shape(cv_img)
 
-    # ── Calculate Final Score ──────────────────────────
-    final_score = int(sum(scores) / len(scores))
-    is_genuine  = final_score >= 60
+    # ------------------------------------------------------
+    # STAGE 3: OCR
+    # ------------------------------------------------------
+
+    document = check_document_text(cv_img)
+
+    checks = [
+        quality,
+        shape,
+        document
+    ]
+
+    # ------------------------------------------------------
+    # STAGE 4: DOCUMENT CLASSIFICATION
+    # ------------------------------------------------------
+
+    if not document["passed"]:
+
+        return build_result(
+            result="NOT_AN_ID_DOCUMENT",
+            confidence=0,
+            checks=checks,
+            message="Identity document indicators were not detected."
+        )
+
+    # A document with insufficient quality needs review.
+    if not quality["passed"]:
+
+        return build_result(
+            result="REVIEW_REQUIRED",
+            confidence=40,
+            checks=checks,
+            message="Document detected, but image quality is insufficient."
+        )
+
+    # ------------------------------------------------------
+    # STAGE 5: TAMPERING ANALYSIS
+    # ------------------------------------------------------
+
+    ela = check_ela(pil_img)
+
+    checks.append(ela)
+
+    qr = check_qr(cv_img)
+
+    # QR is informational only.
+    checks.append(qr)
+
+    # ------------------------------------------------------
+    # STAGE 6: FINAL ASSESSMENT
+    # ------------------------------------------------------
+
+    suspicious = (
+        not shape["passed"]
+        or not ela["passed"]
+    )
+
+    if suspicious:
+
+        return build_result(
+            result="REVIEW_REQUIRED",
+            confidence=55,
+            checks=checks,
+            message="Document indicators detected. Additional verification is required."
+        )
+
+    return build_result(
+        result="DOCUMENT_DETECTED_REVIEW_REQUIRED",
+        confidence=70,
+        checks=checks,
+        message="Document structure detected. Authenticity has not been established."
+    )
+
+
+# ==========================================================
+# IMAGE QUALITY CHECK
+# ==========================================================
+
+def check_quality(img):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    sharpness = cv2.Laplacian(
+        gray,
+        cv2.CV_64F
+    ).var()
+
+    height, width = gray.shape
+
+    passed = (
+        sharpness > 35
+        and min(height, width) >= MIN_IMAGE_SIZE
+    )
 
     return {
-        'result':     'GENUINE' if is_genuine else 'FAKE',
-        'confidence': final_score if is_genuine else (100 - final_score),
-        'checks': [
-            {
-                'name':   c['name'],
-                'passed': c['passed'],
-                'status': c['status']
+        "name": "Image Quality",
+        "passed": bool(passed),
+        "status": (
+            "Image is sufficiently clear"
+            if passed
+            else "Image is blurry or too small"
+        ),
+        "score": 85 if passed else 25
+    }
+
+
+# ==========================================================
+# CARD SHAPE DETECTION
+# ==========================================================
+
+def check_card_shape(img):
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
+    )
+
+    edges = cv2.Canny(
+        gray,
+        40,
+        120
+    )
+
+    kernel = np.ones(
+        (3, 3),
+        np.uint8
+    )
+
+    edges = cv2.dilate(
+        edges,
+        kernel,
+        iterations=2
+    )
+
+    contours, _ = cv2.findContours(
+        edges,
+        cv2.RETR_LIST,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    height, width = gray.shape
+
+    image_area = height * width
+
+    found = False
+
+    for contour in contours:
+
+        area = cv2.contourArea(contour)
+
+        if area < image_area * 0.025:
+            continue
+
+        perimeter = cv2.arcLength(
+            contour,
+            True
+        )
+
+        if perimeter == 0:
+            continue
+
+        approx = cv2.approxPolyDP(
+            contour,
+            0.02 * perimeter,
+            True
+        )
+
+        rect = cv2.minAreaRect(
+            contour
+        )
+
+        rw, rh = rect[1]
+
+        if min(rw, rh) <= 0:
+            continue
+
+        ratio = max(rw, rh) / min(rw, rh)
+
+        # Approximate rectangular ID-card proportions.
+        if (
+            len(approx) == 4
+            and 1.2 <= ratio <= 2.0
+        ):
+            found = True
+            break
+
+    return {
+        "name": "Card Shape",
+        "passed": found,
+        "status": (
+            "Possible rectangular document boundary found"
+            if found
+            else "Document boundary not confidently detected"
+        ),
+        "score": 85 if found else 20
+    }
+
+
+# ==========================================================
+# OCR DOCUMENT VERIFICATION
+# ==========================================================
+
+def check_document_text(img):
+
+    try:
+
+        gray = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGR2GRAY
+        )
+
+        gray = cv2.resize(
+            gray,
+            None,
+            fx=1.5,
+            fy=1.5,
+            interpolation=cv2.INTER_CUBIC
+        )
+
+        # Improve text contrast
+        gray = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11
+        )
+
+        # English OCR
+        text = pytesseract.image_to_string(
+            gray,
+            config="--psm 6"
+        )
+
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            text.lower()
+        )
+
+        # Document-specific indicators
+        document_matches = [
+            keyword
+            for keyword in DOCUMENT_KEYWORDS
+            if keyword in normalized
+        ]
+
+        # Personal information field indicators
+        field_matches = [
+            keyword
+            for keyword in FIELD_KEYWORDS
+            if keyword in normalized
+        ]
+
+        # Extract OCR words
+        words = re.findall(
+            r"[a-zA-Z0-9]{2,}",
+            normalized
+        )
+
+        # Require meaningful document evidence.
+        # These are screening rules, not authentication.
+        passed = (
+            len(document_matches) >= 1
+            and len(field_matches) >= 1
+            and len(words) >= 5
+        )
+
+        return {
+            "name": "Document Text (OCR)",
+            "passed": bool(passed),
+            "status": (
+                f"Document indicators: {len(document_matches)}, "
+                f"field indicators: {len(field_matches)}"
+                if passed
+                else "Insufficient document-specific text detected"
+            ),
+            "score": 90 if passed else 15
+        }
+
+    except Exception:
+
+        return {
+            "name": "Document Text (OCR)",
+            "passed": False,
+            "status": "OCR verification failed",
+            "score": 0
+        }
+
+
+# ==========================================================
+# ERROR LEVEL ANALYSIS
+# ==========================================================
+
+def check_ela(pil_img):
+
+    try:
+
+        buffer = io.BytesIO()
+
+        pil_img.save(
+            buffer,
+            format="JPEG",
+            quality=90
+        )
+
+        buffer.seek(0)
+
+        compressed = Image.open(
+            buffer
+        ).convert("RGB")
+
+        original = np.asarray(
+            pil_img,
+            dtype=np.int16
+        )
+
+        altered = np.asarray(
+            compressed,
+            dtype=np.int16
+        )
+
+        difference = np.abs(
+            original - altered
+        ).sum(axis=2).astype(
+            np.float32
+        )
+
+        if difference.size == 0:
+            raise ValueError("Empty image")
+
+        median = float(
+            np.median(difference)
+        )
+
+        percentile = float(
+            np.percentile(difference, 99)
+        )
+
+        ratio = percentile / (
+            median + 1e-6
+        )
+
+        # ELA is only a warning signal.
+        # It cannot independently prove manipulation.
+        suspicious = ratio > 8.0
+
+        return {
+            "name": "Tampering (ELA)",
+            "passed": not suspicious,
+            "status": (
+                "No strong ELA anomaly detected"
+                if not suspicious
+                else "Unusual compression pattern - manual review suggested"
+            ),
+            "score": 70 if not suspicious else 35
+        }
+
+    except Exception:
+
+        return {
+            "name": "Tampering (ELA)",
+            "passed": False,
+            "status": "ELA analysis unavailable",
+            "score": 35
+        }
+
+
+# ==========================================================
+# QR CODE DETECTION
+# ==========================================================
+
+def check_qr(img):
+
+    try:
+
+        detector = cv2.QRCodeDetector()
+
+        data, points, _ = detector.detectAndDecode(
+            img
+        )
+
+        if data:
+
+            return {
+                "name": "QR Code",
+                "passed": True,
+                "status": "QR code detected and decoded",
+                "score": 80
             }
-            for c in checks
+
+        if points is not None:
+
+            return {
+                "name": "QR Code",
+                "passed": False,
+                "status": "QR detected but could not be decoded",
+                "score": 40
+            }
+
+        return {
+            "name": "QR Code",
+            "passed": False,
+            "status": "No QR code found (informational)",
+            "score": 50
+        }
+
+    except Exception:
+
+        return {
+            "name": "QR Code",
+            "passed": False,
+            "status": "QR analysis unavailable",
+            "score": 50
+        }
+
+
+# ==========================================================
+# RESULT BUILDER
+# ==========================================================
+
+def build_result(result, confidence, checks, message):
+
+    return {
+        "result": result,
+        "confidence": int(confidence),
+        "message": message,
+        "checks": [
+            {
+                "name": str(check["name"]),
+                "passed": bool(check["passed"]),
+                "status": str(check["status"])
+            }
+            for check in checks
         ]
     }
 
 
-# ── CHECK 1: Image Quality ─────────────────────────────
-def check_image_quality(img):
-    try:
-        gray      = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-        height, width = img.shape[:2]
-        is_good   = sharpness > 50 and width > 200 and height > 100
+# ==========================================================
+# ERROR RESULT
+# ==========================================================
 
-        return {
-            'name':   'Image Quality',
-            'passed': is_good,
-            'status': 'Good resolution detected' if is_good else 'Image too blurry or small',
-            'score':  80 if is_good else 30
-        }
-    except Exception:
-        return fail_check('Image Quality', 'Could not analyse image')
+def error_result(message="Could not read image"):
 
-
-# ── CHECK 2: ELA Tampering Detection ──────────────────
-def check_ela_tampering(pil_img):
-    try:
-        # Save at low quality then compare difference
-        buffer1 = io.BytesIO()
-        pil_img.save(buffer1, 'JPEG', quality=90)
-        buffer1.seek(0)
-        img_high = Image.open(buffer1)
-
-        buffer2 = io.BytesIO()
-        pil_img.save(buffer2, 'JPEG', quality=10)
-        buffer2.seek(0)
-        img_low  = Image.open(buffer2)
-
-        # Resize to same size
-        img_low  = img_low.resize(img_high.size)
-
-        # Calculate difference
-        arr_high = np.array(img_high).astype(float)
-        arr_low  = np.array(img_low).astype(float)
-        diff     = np.abs(arr_high - arr_low)
-        ela_mean = diff.mean()
-
-        # Low difference = less tampering
-        is_ok    = ela_mean < 25
-
-        return {
-            'name':   'Pixel Tampering',
-            'passed': is_ok,
-            'status': 'No pixel edits found' if is_ok else 'Pixel manipulation detected',
-            'score':  85 if is_ok else 20
-        }
-    except Exception:
-        return fail_check('Pixel Tampering', 'Could not run tampering check')
-
-
-# ── CHECK 3: Edge Consistency ──────────────────────────
-def check_edge_consistency(img):
-    try:
-        gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        edges   = cv2.Canny(gray, 50, 150)
-        h, w    = edges.shape
-
-        # Check edge density — ID cards have consistent structured edges
-        edge_density = np.sum(edges > 0) / (h * w)
-        is_ok        = 0.02 < edge_density < 0.35
-
-        return {
-            'name':   'Logo & Watermark',
-            'passed': is_ok,
-            'status': 'Document structure looks consistent' if is_ok
-                      else 'Inconsistent document structure',
-            'score':  80 if is_ok else 25
-        }
-    except Exception:
-        return fail_check('Logo & Watermark', 'Could not check structure')
-
-
-# ── CHECK 4: Color Distribution ────────────────────────
-def check_color_distribution(img):
-    try:
-        # Check if image has proper color range
-        # Fake printed IDs often have unusual color balance
-        b, g, r = cv2.split(img)
-
-        b_mean  = np.mean(b)
-        g_mean  = np.mean(g)
-        r_mean  = np.mean(r)
-
-        # All channels should be reasonably balanced
-        diff_bg = abs(float(b_mean) - float(g_mean))
-        diff_gr = abs(float(g_mean) - float(r_mean))
-        is_ok   = diff_bg < 60 and diff_gr < 60
-
-        return {
-            'name':   'Font Analysis',
-            'passed': is_ok,
-            'status': 'Color balance looks natural' if is_ok
-                      else 'Unusual color pattern detected',
-            'score':  82 if is_ok else 28
-        }
-    except Exception:
-        return fail_check('Font Analysis', 'Could not check colors')
-
-
-# ── HELPERS ────────────────────────────────────────────
-def fail_check(name, status):
     return {
-        'name':   name,
-        'passed': False,
-        'status': status,
-        'score':  30
-    }
-
-def error_result():
-    return {
-        'result':     'FAKE',
-        'confidence': 0,
-        'checks': [
-            {'name': 'Image Quality',   'passed': False, 'status': 'Could not read image'},
-            {'name': 'Pixel Tampering', 'passed': False, 'status': 'Could not read image'},
-            {'name': 'Logo & Watermark','passed': False, 'status': 'Could not read image'},
-            {'name': 'Font Analysis',   'passed': False, 'status': 'Could not read image'},
+        "result": "ERROR",
+        "confidence": 0,
+        "message": message,
+        "checks": [
+            {
+                "name": "Image",
+                "passed": False,
+                "status": message
+            }
         ]
     }
